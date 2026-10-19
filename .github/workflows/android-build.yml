@@ -45,13 +45,19 @@ jobs:
         run: |
           set -o pipefail
           ./gradlew assembleDebug --stacktrace 2>&1 | grep -v "D8: An error occurred when parsing kotlin metadata\|To find compatible kotlin versions"
+      - name: Get version
+        id: ver
+        run: echo "VERSION=$(grep mod_version gradle.properties | cut -d= -f2 | tr -d ' ')" >> $GITHUB_OUTPUT
 
-      - name: Upload debug APKs
-        uses: actions/upload-artifact@v4
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: SparkyTube-debug-apks
-          path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+          tag_name: v${{ steps.ver.outputs.VERSION }}-${{ github.run_number }}
+          name: ZoroCrystal v${{ steps.ver.outputs.VERSION }}
+          body: "Auto build from commit ${{ github.sha }}"
+          files: build/libs/!(*-sources).jar
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   release:
     name: Build Release APK
