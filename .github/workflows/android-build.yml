@@ -55,7 +55,7 @@ jobs:
           tag_name: v${{ steps.ver.outputs.VERSION }}-${{ github.run_number }}
           name: ZoroCrystal v${{ steps.ver.outputs.VERSION }}
           body: "Auto build from commit ${{ github.sha }}"
-          files: build/libs/!(*-sources).jar
+          files: app/build/outputs/apk/debug/*.apk  # <-- Fixed path here
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
