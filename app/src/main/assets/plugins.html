@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Plugins</title>
+<link rel="stylesheet" href="sparky_ui.css">
+<style>
+.name{font-weight:600}.ver{color:var(--mute);font-size:.8rem;margin-left:6px}
+.head{display:flex;align-items:center;gap:12px;padding:14px 14px 4px}
+.head .txt{flex:1;min-width:0}
+.head .s{color:var(--mute);font-size:.84rem}
+.body{padding:6px 14px 14px}
+.desc{font-size:.92rem;margin:4px 0 10px}
+.card-t{font-weight:600}
+</style>
+</head>
+<body data-theme="dark">
+<div class="appbar" id="bar">
+  <div class="line">
+    <button class="back" id="back" aria-label="Back"><svg class="ico" viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
+    <h1>Plugins<span class="beta">Beta</span></h1>
+  </div>
+  <div class="tabs">
+    <button class="tab on" id="tabList">Installed</button>
+    <button class="tab" id="tabAdd">Add</button>
+  </div>
+</div>
+<main>
+  <div id="banner"></div>
+  <div id="vList"></div>
+  <div id="vAdd" class="hide">
+    <div class="group"><div class="pad">
+      <div class="card-t">Paste code</div>
+      <div class="note" style="margin:2px 0 10px">A plugin file that starts with the <b>// ==SparkyPlugin==</b> header.</div>
+      <textarea class="field" id="code" spellcheck="false" placeholder="// ==SparkyPlugin==&#10;// @id my-plugin&#10;// @name My plugin&#10;// ==/SparkyPlugin==&#10;sparky.toast('hi');"></textarea>
+      <button class="btn" id="goCode">Install</button>
+    </div></div>
+    <div class="group"><div class="pad">
+      <div class="card-t">From a link</div>
+      <div class="note" style="margin:2px 0 10px">https link to a .js plugin or a .zip bundle.</div>
+      <input class="field" type="text" id="url" placeholder="https://..." autocapitalize="off" autocomplete="off">
+      <button class="btn" id="goUrl">Install from link</button>
+    </div></div>
+    <div class="group"><div class="pad">
+      <div class="card-t">From a file</div>
+      <div class="note" style="margin:2px 0 0">Pick a .js or .zip plugin from your phone.</div>
+      <button class="btn plain" id="goFile">Choose file</button>
+    </div></div>
+    <p class="note" style="padding:0 4px">Plugins are in beta and run inside the YouTube page. Only install ones you trust, the chips on a plugin show what it may do.</p>
+  </div>
+</main>
+
+<script>
+(function () {
+  var bridge = window.SparkyPluginsUi || {
+    isNight: function () { return matchMedia("(prefers-color-scheme: dark)").matches; },
+    state: function () { return JSON.stringify({ plugins: [{ id: "hide-shorts", name: "Hide Shorts", version: "1.0", author: "you", description: "Hides the Shorts shelf", permissions: ["toast"], enabled: true }], busy: false, message: "", ok: true, seq: 0 }); },
+    setEnabled: function () {}, remove: function () {}, installCode: function () {}, installUrl: function () {}, pickFile: function () {}, openUrl: function () {}, close: function () {}
+  };
+  document.body.setAttribute("data-theme", bridge.isNight() ? "dark" : "light");
+
+  var tab = "list", S = null, last = "", shownSeq = 0, hideBannerAt = 0, hint = "", hintUntil = 0;
+  var vList = document.getElementById("vList"), vAdd = document.getElementById("vAdd"), banner = document.getElementById("banner");
+  var tabL = document.getElementById("tabList"), tabA = document.getElementById("tabAdd");
+
+  function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+
+  function drawList() {
+    var p = S.plugins || [];
+    if (!p.length) return '<div class="empty">No plugins yet.<br>Tap <b>Add</b> to install one.</div>';
+    return p.map(function (x) {
+      var chips = '<span class="chip">storage</span>' + (x.permissions || []).map(function (q) { return '<span class="chip hot">' + esc(q) + '</span>'; }).join("");
+      return '<div class="group"><div class="head"><div class="txt"><span class="name">' + esc(x.name) + '</span><span class="ver">' + esc(x.version) + '</span>' +
+        '<div class="s">' + esc(x.author || "unknown author") + ' · ' + esc(x.id) + '</div></div>' +
+        '<span class="switch' + (x.enabled ? ' on' : '') + '" data-toggle="' + esc(x.id) + '" role="switch"></span></div>' +
+        '<div class="body">' + (x.description ? '<div class="desc">' + esc(x.description) + '</div>' : '') + chips +
+        '<div><button class="btn plain small" style="margin-top:8px" data-remove="' + esc(x.id) + '">Remove</button></div></div></div>';
+    }).join("");
+  }
+
+  function render() {
+    tabL.className = "tab" + (tab === "list" ? " on" : "");
+    tabA.className = "tab" + (tab === "add" ? " on" : "");
+    vList.className = tab === "list" ? "" : "hide";
+    vAdd.className = tab === "add" ? "" : "hide";
+
+    var b = "";
+    if (S.busy) b = '<div class="banner ok">Installing…</div>';
+    else if (S.message && Date.now() < hideBannerAt) b = '<div class="banner ' + (S.ok ? 'ok' : 'bad') + '">' + esc(S.message) + '</div>';
+    else if (hint && Date.now() < hintUntil) b = '<div class="banner ok">' + esc(hint) + '</div>';
+    banner.innerHTML = b;
+    ["goCode", "goUrl", "goFile"].forEach(function (id) { document.getElementById(id).disabled = !!S.busy; });
+
+    var h = drawList();
+    if (h !== last) { last = h; vList.innerHTML = h; }
+  }
+
+  function poll() {
+    try { S = JSON.parse(bridge.state()); } catch (e) { return; }
+    if (S.seq !== shownSeq && S.message) {
+      shownSeq = S.seq;
+      hideBannerAt = Date.now() + 6000;
+      if (S.ok) { tab = "list"; document.getElementById("code").value = ""; document.getElementById("url").value = ""; }
+    }
+    render();
+  }
+
+  tabL.onclick = function () { tab = "list"; render(); };
+  tabA.onclick = function () { tab = "add"; render(); };
+  document.getElementById("back").onclick = function () { bridge.close(); };
+  document.getElementById("goCode").onclick = function () {
+    var c = document.getElementById("code").value;
+    if (c.trim()) bridge.installCode(c);
+    setTimeout(poll, 100);
+  };
+  document.getElementById("goUrl").onclick = function () {
+    var u = document.getElementById("url").value;
+    if (u.trim()) bridge.installUrl(u);
+    setTimeout(poll, 100);
+  };
+  document.getElementById("goFile").onclick = function () { bridge.pickFile(); };
+
+  document.addEventListener("click", function (e) {
+    var t = e.target.closest("[data-toggle]");
+    if (t) {
+      var id = t.getAttribute("data-toggle"), on = !t.classList.contains("on");
+      bridge.setEnabled(id, on);
+      t.classList.toggle("on", on);
+      hint = "Applies the next time the page loads"; hintUntil = Date.now() + 4000;
+      setTimeout(poll, 150);
+      return;
+    }
+    var r = e.target.closest("[data-remove]");
+    if (r && confirm("Remove this plugin and its saved data?")) {
+      bridge.remove(r.getAttribute("data-remove"));
+      setTimeout(poll, 100);
+    }
+  });
+
+  window.addEventListener("scroll", function () { document.getElementById("bar").classList.toggle("scrolled", window.scrollY > 4); }, { passive: true });
+  poll();
+  setInterval(poll, 800);
+})();
+</script>
+</body>
+</html>

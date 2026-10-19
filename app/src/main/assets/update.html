@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Update</title>
+<link rel="stylesheet" href="sparky_ui.css">
+<style>
+.big{font-size:1.2rem;font-weight:600;line-height:1.25}
+.pad .sub{color:var(--mute);font-size:.88rem;margin-top:3px}
+.msg .t{font-weight:600}.msg .b{margin-top:6px;white-space:pre-wrap}.msg .d{color:var(--mute);font-size:.78rem;margin-top:8px}
+.msg.unread{box-shadow:inset 3px 0 0 var(--accent)}
+.err{color:var(--accent);font-size:.9rem;margin-top:10px}
+</style>
+</head>
+<body data-theme="dark">
+<div class="appbar" id="bar">
+  <div class="line">
+    <button class="back" id="back" aria-label="Back"><svg class="ico" viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
+    <h1>Update</h1>
+  </div>
+  <div class="tabs">
+    <button class="tab on" id="tabUpdate">Update</button>
+    <button class="tab" id="tabMsgs">Messages<span class="dot hide" id="dot"></span></button>
+  </div>
+</div>
+<main>
+  <div id="vUpdate"></div>
+  <div id="vMsgs" class="hide"></div>
+</main>
+
+<script>
+(function () {
+  var bridge = window.SparkyUpdate || {
+    // stand-in so the page also opens in a normal browser while editing
+    isNight: function () { return matchMedia("(prefers-color-scheme: dark)").matches; },
+    initialTab: function () { return "update"; },
+    state: function () { return JSON.stringify({ currentName: "2.0", currentCode: 13, phase: "IDLE", checked: true, hasUpdate: true, error: "", downloaded: 0, total: 0, speed: 0,
+      latest: { name: "2.1", code: 14, changelog: "- new stuff\n- fixes", date: "2026-10-10T00:00:00Z", size: 31457280, mandatory: false },
+      messages: [{ id: 1, title: "Hello", body: "Test message", type: "info", link: "", date: "2026-10-10T00:00:00Z", unread: true }] }); },
+    check: function () {}, update: function () {}, install: function () {}, markRead: function () {}, openUrl: function () {}, close: function () {}
+  };
+  document.body.setAttribute("data-theme", bridge.isNight() ? "dark" : "light");
+
+  var tab = bridge.initialTab() === "messages" ? "messages" : "update";
+  var vUpdate = document.getElementById("vUpdate"), vMsgs = document.getElementById("vMsgs");
+  var tabU = document.getElementById("tabUpdate"), tabM = document.getElementById("tabMsgs"), dot = document.getElementById("dot");
+  var last = "", S = null;
+
+  function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+  function mb(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB"; }
+  function day(iso) { try { return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }); } catch (e) { return ""; } }
+
+  function drawUpdate() {
+    var s = S, l = s.latest, h = "";
+    if (s.phase === "CHECKING" && !l) {
+      return '<div class="group"><div class="pad"><div class="big">Checking for updates…</div><div class="sub">Version ' + esc(s.currentName) + '. The server can take up to a minute to wake up.</div><div class="bar ind"><i></i></div></div></div>';
+    }
+    if (s.hasUpdate && l) {
+      h += '<div class="group"><div class="pad"><div class="big">Version ' + esc(l.name) + ' is available</div>' +
+           '<div class="sub">You have ' + esc(s.currentName) + (l.date ? ' · ' + esc(day(l.date)) : '') + (l.size ? ' · ' + mb(l.size) : '') + '</div>';
+      if (s.phase === "DOWNLOADING") {
+        var pct = s.total > 0 ? Math.min(100, Math.floor(s.downloaded * 100 / s.total)) : -1;
+        h += '<div class="bar' + (pct < 0 ? ' ind' : '') + '"><i style="width:' + (pct < 0 ? 35 : pct) + '%"></i></div>' +
+             '<div class="meta"><span>' + (pct >= 0 ? pct + '%' : 'Downloading…') + '</span><span>' + mb(s.downloaded) + (s.total ? ' / ' + mb(s.total) : '') + (s.speed > 0 ? ' · ' + mb(s.speed) + '/s' : '') + '</span></div>';
+      } else if (s.phase === "READY") {
+        h += '<button class="btn" data-a="install">Install</button>';
+      } else {
+        h += '<button class="btn" data-a="update">' + (s.phase === "ERROR" ? 'Try again' : 'Update') + '</button>';
+      }
+      if (s.error) h += '<div class="err">' + esc(s.error) + '</div>';
+      h += '</div></div>';
+      if (l.changelog) h += '<div class="label">What\'s new</div><div class="group"><div class="pad"><div class="log" style="margin:0;padding:0;border:0;max-height:none">' + esc(l.changelog) + '</div></div></div>';
+      return h;
+    }
+    if (s.checked && l) {
+      return '<div class="group"><div class="pad"><div class="big">You\'re up to date</div><div class="sub">Version ' + esc(s.currentName) + ' (' + s.currentCode + ')</div>' +
+             '<button class="btn plain" data-a="check">Check again</button></div></div>';
+    }
+    return '<div class="group"><div class="pad"><div class="big">Couldn\'t check right now</div><div class="sub">Version ' + esc(s.currentName) + '. The update server isn\'t reachable, try again in a bit.</div>' +
+           '<button class="btn plain" data-a="check">Try again</button></div></div>';
+  }
+
+  function drawMsgs() {
+    var m = S.messages || [];
+    if (!m.length) return '<div class="empty">No messages yet.</div>';
+    return m.map(function (x) {
+      return '<div class="group msg' + (x.unread ? ' unread' : '') + '"><div class="pad"><div class="t">' + (x.type !== "info" ? '<span class="chip' + (x.type === "warning" ? ' hot' : '') + '">' + esc(x.type) + '</span>' : '') + esc(x.title) + '</div>' +
+             '<div class="b">' + esc(x.body) + '</div>' +
+             (x.link ? '<button class="btn plain small" style="margin-top:10px" data-link="' + esc(x.link) + '">Open link</button>' : '') +
+             '<div class="d">' + esc(day(x.date)) + '</div></div></div>';
+    }).join("");
+  }
+
+  function unread() { return (S.messages || []).filter(function (x) { return x.unread; }).length; }
+
+  function render() {
+    var u = unread();
+    dot.textContent = u; dot.className = "dot" + (u > 0 ? "" : " hide");
+    tabU.className = "tab" + (tab === "update" ? " on" : "");
+    tabM.className = "tab" + (tab === "messages" ? " on" : "");
+    vUpdate.className = tab === "update" ? "" : "hide";
+    vMsgs.className = tab === "messages" ? "" : "hide";
+    var hu = drawUpdate(), hm = drawMsgs();
+    var sig = tab + "|" + hu + "|" + hm;
+    if (sig === last) return;
+    last = sig;
+    vUpdate.innerHTML = hu; vMsgs.innerHTML = hm;
+    if (tab === "messages" && u > 0) bridge.markRead();
+  }
+
+  function poll() {
+    try { S = JSON.parse(bridge.state()); } catch (e) { return; }
+    render();
+  }
+
+  tabU.onclick = function () { tab = "update"; last = ""; render(); };
+  tabM.onclick = function () { tab = "messages"; last = ""; render(); };
+  document.getElementById("back").onclick = function () { bridge.close(); };
+
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest("[data-a]");
+    if (a) {
+      var act = a.getAttribute("data-a");
+      if (act === "update") bridge.update(); else if (act === "install") bridge.install(); else bridge.check();
+      setTimeout(poll, 150);
+      return;
+    }
+    var l = e.target.closest("[data-link]");
+    if (l) bridge.openUrl(l.getAttribute("data-link"));
+  });
+
+  window.addEventListener("scroll", function () { document.getElementById("bar").classList.toggle("scrolled", window.scrollY > 4); }, { passive: true });
+  poll();
+  setInterval(poll, 700);
+})();
+</script>
+</body>
+</html>
