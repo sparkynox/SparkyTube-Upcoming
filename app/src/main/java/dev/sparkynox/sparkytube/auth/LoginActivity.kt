@@ -11,6 +11,7 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
+import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.LinearLayout
@@ -30,6 +31,7 @@ import org.json.JSONTokener
 class LoginActivity : AppCompatActivity() {
 
     private var done = false
+    private lateinit var web: WebView
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -55,6 +57,13 @@ class LoginActivity : AppCompatActivity() {
             textSize = 18f
         }, LinearLayout.LayoutParams(0, (52 * dp).toInt(), 1f).apply { gravity = Gravity.CENTER_VERTICAL })
         bar.addView(TextView(this).apply {
+            text = "Reload"
+            setTextColor(fg)
+            textSize = 15f
+            setPadding((12 * dp).toInt(), (12 * dp).toInt(), (12 * dp).toInt(), (12 * dp).toInt())
+            setOnClickListener { restart() }
+        })
+        bar.addView(TextView(this).apply {
             text = "Close"
             setTextColor(getColor(R.color.accent))
             textSize = 15f
@@ -63,7 +72,7 @@ class LoginActivity : AppCompatActivity() {
         })
         root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        val web = WebView(this)
+        web = WebView(this)
         web.setBackgroundColor(Color.TRANSPARENT)
         web.isFocusable = true
         web.isFocusableInTouchMode = true
@@ -74,10 +83,9 @@ class LoginActivity : AppCompatActivity() {
             javaScriptCanOpenWindowsAutomatically = true
             setSupportMultipleWindows(false)
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-            // Same WebView identity as the main browser (default user agent + our token). Pretending to be
-            // Chrome made Google see a mismatch against WebView's client hints and bounce "Next" back to
-            // the identifier page.
-            userAgentString = userAgentString + " SparkyTube/1.0"
+            // same trick LunoMusic uses: only drop the "; wv" marker. extra tokens or a fake
+            // Chrome string made google hang the Next button on the identifier page
+            userAgentString = userAgentString.replace("; wv", "")
         }
 
         // Google's sign-in hops between accounts.google.com and youtube.com and needs cross-site cookies
@@ -109,13 +117,7 @@ class LoginActivity : AppCompatActivity() {
             }
         }
 
-        // Start from a clean jar so the account picker always shows. The wipe is asynchronous, so the
-        // sign-in page is only loaded once it has finished; loading straight away let the wipe delete
-        // the cookies Google had just set, which is what left "Next" hanging.
-        cookies.removeAllCookies {
-            cookies.flush()
-            web.loadUrl(SIGN_IN_URL)
-        }
+        restart()
         root.addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
 
@@ -124,6 +126,20 @@ class LoginActivity : AppCompatActivity() {
                 if (web.canGoBack()) web.goBack() else finish()
             }
         })
+    }
+
+    // wipes everything google may have left from an earlier try, then loads the sign-in page.
+    // old localStorage/indexeddb with fresh cookies was the mismatch that left Next loading forever
+    private fun restart() {
+        val cookies = CookieManager.getInstance()
+        web.stopLoading()
+        WebStorage.getInstance().deleteAllData()
+        web.clearCache(true)
+        web.clearHistory()
+        cookies.removeAllCookies {
+            cookies.flush()
+            web.loadUrl(SIGN_IN_URL)
+        }
     }
 
     // ytcfg is not always ready right when the page finishes, so retry a few times
