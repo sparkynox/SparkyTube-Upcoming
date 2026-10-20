@@ -310,13 +310,21 @@ object InnerTubeClient {
         if (!Session.loggedIn) return@withContext null
         try {
             val root = post("player", JSONObject().put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true))
-            val tracking = root.optJSONObject("playbackTracking") ?: return@withContext null
+            val status = root.optJSONObject("playabilityStatus")?.optString("status")
+            val tracking = root.optJSONObject("playbackTracking")
+            if (tracking == null) {
+                LogRecorder.w(TAG, "history: no playbackTracking for $videoId (playability=$status)")
+                return@withContext null
+            }
             val start = tracking.optJSONObject("videostatsPlaybackUrl")?.optString("baseUrl")?.takeIf { it.isNotBlank() }
-                ?: return@withContext null
+            if (start == null) {
+                LogRecorder.w(TAG, "history: no videostatsPlaybackUrl for $videoId (playability=$status)")
+                return@withContext null
+            }
             val watch = tracking.optJSONObject("videostatsWatchtimeUrl")?.optString("baseUrl")?.takeIf { it.isNotBlank() }
             val cpn = (1..16).map { CPN_ALPHABET.random() }.joinToString("")
-            ping("$start&ver=2&c=WEB&cpn=$cpn&cmt=0")
-            LogRecorder.d(TAG, "history: playback registered for $videoId")
+            val code = ping("$start&ver=2&c=WEB&cpn=$cpn&cmt=0")
+            LogRecorder.d(TAG, "history: start ping for $videoId -> HTTP $code (watchtime url=${watch != null})")
             PlaybackSession(cpn, watch)
         } catch (e: Exception) {
             LogRecorder.w(TAG, "history start failed: ${e.message}")
@@ -327,13 +335,14 @@ object InnerTubeClient {
     suspend fun reportWatchTime(s: PlaybackSession, fromSec: Double, toSec: Double) = withContext(Dispatchers.IO) {
         val url = s.watchtimeUrl ?: return@withContext
         try {
-            ping("$url&ver=2&c=WEB&cpn=${s.cpn}&cmt=$toSec&st=$fromSec&et=$toSec&state=playing")
+            val code = ping("$url&ver=2&c=WEB&cpn=${s.cpn}&cmt=$toSec&st=$fromSec&et=$toSec&state=playing")
+            LogRecorder.d(TAG, "history: watchtime ${fromSec.toInt()}s-${toSec.toInt()}s -> HTTP $code")
         } catch (e: Exception) {
             LogRecorder.w(TAG, "history ping failed: ${e.message}")
         }
     }
 
-    private fun ping(url: String) {
+    private fun ping(url: String): Int {
         val rb = Request.Builder().url(url).get()
             .header("User-Agent", UA)
             .header("Origin", ORIGIN)
@@ -344,7 +353,7 @@ object InnerTubeClient {
             rb.header("Cookie", cookie)
             rb.header("Authorization", sapisidHash(sapisid))
         }
-        http.newCall(rb.build()).execute().use { /* response body not needed */ }
+        return http.newCall(rb.build()).execute().use { it.code }
     }
 
     // ---------- request
