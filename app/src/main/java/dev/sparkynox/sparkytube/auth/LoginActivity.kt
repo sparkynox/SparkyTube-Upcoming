@@ -11,15 +11,12 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
-import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
-import androidx.webkit.WebSettingsCompat
-import androidx.webkit.WebViewFeature
 import dev.sparkynox.sparkytube.R
 import dev.sparkynox.sparkytube.logs.LogRecorder
 import org.json.JSONObject
@@ -77,13 +74,10 @@ class LoginActivity : AppCompatActivity() {
             javaScriptCanOpenWindowsAutomatically = true
             setSupportMultipleWindows(false)
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-            // Google blocks or stalls sign-in in embedded WebViews. Two things give it away: "; wv" and
-            // "Version/4.0" in the user agent (a real Chrome has neither) ...
-            userAgentString = userAgentString.replace("; wv", "").replace(Regex("\\s?Version/\\d+\\.\\d+"), "")
-        }
-        // ... and the X-Requested-With header (the app's package name) WebView adds to every request
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
-            WebSettingsCompat.setRequestedWithHeaderOriginAllowList(web.settings, emptySet())
+            // Same WebView identity as the main browser (default user agent + our token). Pretending to be
+            // Chrome made Google see a mismatch against WebView's client hints and bounce "Next" back to
+            // the identifier page.
+            userAgentString = userAgentString + " SparkyTube/1.0"
         }
 
         // Google's sign-in hops between accounts.google.com and youtube.com and needs cross-site cookies
@@ -97,6 +91,7 @@ class LoginActivity : AppCompatActivity() {
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
+                LogRecorder.d("Login", "page finished: ${url?.substringBefore('?')}")
                 if (done || url == null) return
                 if (url.startsWith("https://m.youtube.com") || url.startsWith("https://www.youtube.com")) poll(view, url, 0)
             }
@@ -119,9 +114,7 @@ class LoginActivity : AppCompatActivity() {
         // the cookies Google had just set, which is what left "Next" hanging.
         cookies.removeAllCookies {
             cookies.flush()
-            WebStorage.getInstance().deleteAllData()
-            web.clearCache(true)
-            web.loadUrl("https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fm.youtube.com%2F")
+            web.loadUrl(SIGN_IN_URL)
         }
         root.addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
@@ -161,6 +154,13 @@ class LoginActivity : AppCompatActivity() {
     }
 
     private companion object {
+        // YouTube-initiated sign-in: after the Google login, youtube.com's own /signin?action_handle_signin
+        // step runs and sets the YouTube cookies (SAPISID), which a plain "continue" to m.youtube.com does not
+        const val SIGN_IN_URL =
+            "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true" +
+                "&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue" +
+                "%26app%3Dm%26hl%3Den%26next%3Dhttps%253A%252F%252Fm.youtube.com%252F"
+
         const val GET_CONFIG =
             "(function(){try{var g=function(k){try{return window.ytcfg.get(k)}catch(e){return null}};" +
                 "return JSON.stringify({v:g('VISITOR_DATA')||'',d:g('DATASYNC_ID')||'',c:g('INNERTUBE_CLIENT_VERSION')||''});}" +
