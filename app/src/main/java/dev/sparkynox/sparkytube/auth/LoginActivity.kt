@@ -7,12 +7,19 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewFeature
 import dev.sparkynox.sparkytube.R
 import dev.sparkynox.sparkytube.logs.LogRecorder
 import org.json.JSONObject
@@ -59,24 +66,62 @@ class LoginActivity : AppCompatActivity() {
         })
         root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        val web = WebView(this).apply {
-            setBackgroundColor(Color.TRANSPARENT)
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            // Google refuses sign-in inside embedded WebViews, "; wv" is what gives it away
-            settings.userAgentString = settings.userAgentString.replace("; wv", "")
+        val web = WebView(this)
+        web.setBackgroundColor(Color.TRANSPARENT)
+        web.isFocusable = true
+        web.isFocusableInTouchMode = true
+        web.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            javaScriptCanOpenWindowsAutomatically = true
+            setSupportMultipleWindows(false)
+            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            // Google blocks or stalls sign-in in embedded WebViews. Two things give it away: "; wv" and
+            // "Version/4.0" in the user agent (a real Chrome has neither) ...
+            userAgentString = userAgentString.replace("; wv", "").replace(Regex("\\s?Version/\\d+\\.\\d+"), "")
+        }
+        // ... and the X-Requested-With header (the app's package name) WebView adds to every request
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
+            WebSettingsCompat.setRequestedWithHeaderOriginAllowList(web.settings, emptySet())
+        }
 
-            // start from a clean jar so the account picker always shows
-            CookieManager.getInstance().removeAllCookies(null)
-            CookieManager.getInstance().flush()
+        // Google's sign-in hops between accounts.google.com and youtube.com and needs cross-site cookies
+        val cookies = CookieManager.getInstance()
+        cookies.setAcceptCookie(true)
+        cookies.setAcceptThirdPartyCookies(web, true)
 
-            webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView, url: String?) {
-                    if (done || url == null) return
-                    if (url.startsWith("https://m.youtube.com") || url.startsWith("https://www.youtube.com")) poll(view, url, 0)
+        web.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                LogRecorder.d("Login", "page started: ${url?.substringBefore('?')}")
+            }
+
+            override fun onPageFinished(view: WebView, url: String?) {
+                if (done || url == null) return
+                if (url.startsWith("https://m.youtube.com") || url.startsWith("https://www.youtube.com")) poll(view, url, 0)
+            }
+
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                if (request.isForMainFrame) {
+                    LogRecorder.w("Login", "main frame error ${error.errorCode}: ${error.description} (${request.url.host})")
                 }
             }
-            loadUrl("https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fm.youtube.com%2F")
+
+            override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+                if (request.isForMainFrame) {
+                    LogRecorder.w("Login", "HTTP ${errorResponse.statusCode} on ${request.url.host}")
+                }
+            }
+        }
+
+        // Start from a clean jar so the account picker always shows. The wipe is asynchronous, so the
+        // sign-in page is only loaded once it has finished; loading straight away let the wipe delete
+        // the cookies Google had just set, which is what left "Next" hanging.
+        cookies.removeAllCookies {
+            cookies.flush()
+            WebStorage.getInstance().deleteAllData()
+            web.clearCache(true)
+            web.loadUrl("https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fm.youtube.com%2F")
         }
         root.addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
