@@ -110,6 +110,100 @@ object InnerTubeClient {
         }
     }
 
+    /** Any browse page: FEsubscriptions, FEhistory, VLLL (liked), VLWL (watch later), VL<playlist id>... */
+    suspend fun fetchBrowse(browseId: String): HomeFeedResult =
+        load { post("browse", JSONObject().put("browseId", browseId)) }
+
+    /** More related videos under a watch page (continuation tokens there belong to the `next` endpoint). */
+    suspend fun fetchNextContinuation(token: String): HomeFeedResult =
+        load { post("next", JSONObject().put("continuation", token)) }
+
+    suspend fun fetchSearch(query: String): HomeFeedResult =
+        load { post("search", JSONObject().put("query", query)) }
+
+    suspend fun fetchSearchContinuation(token: String): HomeFeedResult =
+        load { post("search", JSONObject().put("continuation", token)) }
+
+    /**
+     * Shorts for the Shorts tab. YouTube has no plain "shorts home" browse id for the web client, so
+     * this harvests the Shorts shelves out of the home feed (up to 3 pages) and falls back to a
+     * "#shorts" search when the feed has none.
+     */
+    suspend fun fetchShorts(): HomeFeedResult = withContext(Dispatchers.IO) {
+        val loggedIn = Session.loggedIn
+        val found = LinkedHashMap<String, HomeFeedItem>()
+        fun harvest(root: JSONObject) {
+            val tmp = ArrayList<HomeFeedItem>()
+            collectShorts(root, tmp)
+            tmp.forEach { s -> s.videoId?.let { found.putIfAbsent(it, s) } }
+        }
+        try {
+            var root = post("browse", JSONObject().put("browseId", "FEwhat_to_watch"))
+            var pages = 0
+            while (true) {
+                harvest(root)
+                val token = findContinuationToken(root)
+                if (found.size >= 12 || token == null || ++pages >= 3) break
+                root = post("browse", JSONObject().put("continuation", token))
+            }
+            if (found.size < 6) harvest(post("search", JSONObject().put("query", "#shorts")))
+            LogRecorder.d(TAG, "shorts: ${found.size} found")
+            HomeFeedResult(found.values.toList(), loggedIn)
+        } catch (e: IOException) {
+            HomeFeedResult(found.values.toList(), loggedIn, error = e.message ?: "network error")
+        } catch (e: Exception) {
+            LogRecorder.e(TAG, "shorts parse failed", e)
+            HomeFeedResult(emptyList(), loggedIn, error = "couldn't read Shorts")
+        }
+    }
+
+    data class WatchInfo(
+        val title: String?,
+        val meta: String?,
+        val channelName: String?,
+        val channelAvatar: String?,
+        val subscribers: String?,
+        val description: String?,
+        val related: List<HomeFeedItem>,
+        val continuation: String?,
+        val error: String? = null,
+    )
+
+    /** Everything under the player on a watch page: title, channel, description and the related list. */
+    suspend fun fetchWatch(videoId: String): WatchInfo = withContext(Dispatchers.IO) {
+        try {
+            val root = post("next", JSONObject().put("videoId", videoId))
+            val primary = findFirst(root, "videoPrimaryInfoRenderer")
+            val secondary = findFirst(root, "videoSecondaryInfoRenderer")
+            val owner = secondary?.optJSONObject("owner")?.optJSONObject("videoOwnerRenderer")
+
+            val views = text(primary?.optJSONObject("viewCount")?.optJSONObject("videoViewCountRenderer")?.optJSONObject("viewCount"))
+            val date = text(primary?.optJSONObject("dateText"))
+            val desc = secondary?.optJSONObject("attributedDescription")?.optString("content")?.takeIf { it.isNotBlank() }
+                ?: text(secondary?.optJSONObject("description"))
+
+            val results = findFirst(root, "secondaryResults")
+            val related = ArrayList<HomeFeedItem>()
+            collect(results, related)
+
+            val info = WatchInfo(
+                title = text(primary?.optJSONObject("title")),
+                meta = listOfNotNull(views, date).joinToString(" \u2022 ").ifBlank { null },
+                channelName = text(owner?.optJSONObject("title")),
+                channelAvatar = lastThumb(owner?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")),
+                subscribers = text(owner?.optJSONObject("subscriberCountText")),
+                description = desc,
+                related = related.filter { it.videoId != videoId }.distinctBy { it.videoId ?: it.playlistId },
+                continuation = findContinuationToken(results),
+            )
+            LogRecorder.d(TAG, "watch $videoId: title=${info.title != null}, channel=${info.channelName != null}, related=${info.related.size}")
+            info
+        } catch (e: Exception) {
+            LogRecorder.w(TAG, "watch info failed for $videoId", e)
+            WatchInfo(null, null, null, null, null, null, emptyList(), null, e.message ?: "couldn't load")
+        }
+    }
+
     // ---------- request
 
     private fun post(path: String, body: JSONObject): JSONObject {
@@ -175,6 +269,8 @@ object InnerTubeClient {
                 node.optJSONObject("videoRenderer")?.let { parseVideoRenderer(it)?.let(out::add) }
                 node.optJSONObject("gridVideoRenderer")?.let { parseVideoRenderer(it)?.let(out::add) }
                 node.optJSONObject("lockupViewModel")?.let { parseLockup(it)?.let(out::add) }
+                node.optJSONObject("compactVideoRenderer")?.let { parseVideoRenderer(it)?.let(out::add) }
+                node.optJSONObject("playlistVideoRenderer")?.let { parseVideoRenderer(it)?.let(out::add) }
                 node.optJSONObject("radioRenderer")?.let { parsePlaylistLike(it)?.let(out::add) }
                 (node.optJSONObject("playlistRenderer") ?: node.optJSONObject("compactPlaylistRenderer"))
                     ?.let { parsePlaylistLike(it)?.let(out::add) }
@@ -187,7 +283,8 @@ object InnerTubeClient {
     private fun parseVideoRenderer(r: JSONObject): HomeFeedItem? {
         val videoId = r.optString("videoId").takeIf { it.isNotBlank() } ?: return null
         val title = text(r.optJSONObject("title"))?.takeIf { it.isNotBlank() } ?: return null
-        val channel = text(r.optJSONObject("ownerText")) ?: text(r.optJSONObject("shortBylineText")) ?: ""
+        val channel = text(r.optJSONObject("ownerText")) ?: text(r.optJSONObject("shortBylineText"))
+            ?: text(r.optJSONObject("longBylineText")) ?: ""
 
         // lengthText is missing on many shelves, the time status overlay has it too
         val duration = text(r.optJSONObject("lengthText"))
@@ -196,7 +293,8 @@ object InnerTubeClient {
                 ?.let { text(it.optJSONObject("text")) }
             ?: ""
 
-        val views = text(r.optJSONObject("shortViewCountText")) ?: text(r.optJSONObject("viewCountText")) ?: ""
+        val views = text(r.optJSONObject("shortViewCountText")) ?: text(r.optJSONObject("viewCountText"))
+            ?: text(r.optJSONObject("videoInfo")) ?: ""
         val age = text(r.optJSONObject("publishedTimeText")) ?: ""
 
         val avatar = r.optJSONObject("channelThumbnailSupportedRenderers")
@@ -246,7 +344,8 @@ object InnerTubeClient {
         return if (isVideo) {
             HomeFeedItem(id, null, title, channel, thumb, avatar, badge ?: "", rest)
         } else {
-            HomeFeedItem(null, id, title, channel, thumb, avatar, "", rest, itemCountText = badge)
+            val firstVideo = findFirst(l, "watchEndpoint")?.optString("videoId")?.takeIf { it.length == 11 }
+            HomeFeedItem(firstVideo, id, title, channel, thumb, avatar, "", rest, itemCountText = badge)
         }
     }
 
@@ -259,7 +358,8 @@ object InnerTubeClient {
                 ?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
         val count = text(r.optJSONObject("videoCountShortText")) ?: text(r.optJSONObject("videoCountText"))
         return HomeFeedItem(
-            videoId = r.optString("videoId").takeIf { it.isNotBlank() },
+            videoId = r.optString("videoId").takeIf { it.isNotBlank() }
+                ?: r.optJSONObject("navigationEndpoint")?.optJSONObject("watchEndpoint")?.optString("videoId")?.takeIf { it.length == 11 },
             playlistId = playlistId,
             title = title,
             channelName = channel,
@@ -268,6 +368,38 @@ object InnerTubeClient {
             viewCountText = "",
             itemCountText = count?.takeIf { it.isNotBlank() },
         )
+    }
+
+    // Shorts come as shortsLockupViewModel (current) or reelItemRenderer (older), never as a normal video card
+    private fun collectShorts(node: Any?, out: MutableList<HomeFeedItem>) {
+        when (node) {
+            is JSONObject -> {
+                node.optJSONObject("shortsLockupViewModel")?.let { parseShortLockup(it)?.let(out::add) }
+                node.optJSONObject("reelItemRenderer")?.let { parseReelItem(it)?.let(out::add) }
+                node.keys().forEach { collectShorts(node.opt(it), out) }
+            }
+            is JSONArray -> for (i in 0 until node.length()) collectShorts(node.opt(i), out)
+        }
+    }
+
+    private fun parseShortLockup(l: JSONObject): HomeFeedItem? {
+        val id = findFirst(l, "reelWatchEndpoint")?.optString("videoId")?.takeIf { it.length == 11 }
+            ?: l.optString("entityId").removePrefix("shorts-shelf-item-").takeIf { it.length == 11 }
+            ?: return null
+        val overlay = l.optJSONObject("overlayMetadata")
+        val title = overlay?.optJSONObject("primaryText")?.optString("content")?.takeIf { it.isNotBlank() } ?: "Short"
+        val views = overlay?.optJSONObject("secondaryText")?.optString("content") ?: ""
+        val thumb = lastThumb(l.optJSONObject("thumbnail")?.optJSONArray("sources"))
+            ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg"
+        return HomeFeedItem(id, null, title, "", thumb, null, "", views, isShort = true)
+    }
+
+    private fun parseReelItem(r: JSONObject): HomeFeedItem? {
+        val id = r.optString("videoId").takeIf { it.length == 11 } ?: return null
+        val title = text(r.optJSONObject("headline")) ?: "Short"
+        val thumb = lastThumb(r.optJSONObject("thumbnail")?.optJSONArray("thumbnails"))
+            ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg"
+        return HomeFeedItem(id, null, title, "", thumb, null, "", text(r.optJSONObject("viewCountText")) ?: "", isShort = true)
     }
 
     private fun parseChips(root: JSONObject): List<FeedChip> {
