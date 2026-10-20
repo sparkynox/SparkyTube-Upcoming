@@ -175,42 +175,81 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
         val s = total % 60
         return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
     }
-    // ---------- watch history for the native player (real play only)
-    private var histSession: dev.sparkynox.sparkytube.homefeed.InnerTubeClient.PlaybackSession? = null
+    // ---------- watch history
+    // The real watch page can't be tracked from ExoPlayer, so after 30s of real playback the real
+    // page plays muted at 144p in the hidden WebView (signed in with the same cookies). It mirrors
+    // the native player: plays while ExoPlayer plays, pauses when it pauses, stops when the video changes.
     private var histVideoId: String? = null
-    private var histLastReportMs = 0L
-    private var histLastPosSec = 0.0
-
-    private fun startHistory(videoId: String) {
-        if (!composeNav() || !dev.sparkynox.sparkytube.auth.Session.loggedIn || histVideoId == videoId) return
-        histVideoId = videoId
-        histSession = null
-        lifecycleScope.launch {
-            val s = dev.sparkynox.sparkytube.homefeed.InnerTubeClient.startPlayback(videoId)
-            if (histVideoId == videoId) {
-                histSession = s
-                histLastReportMs = android.os.SystemClock.elapsedRealtime()
-                histLastPosSec = (mediaController?.currentPosition ?: 0L) / 1000.0
-            }
+    private var histPlayedMs = 0L
+    private var histLastTick = 0L
+    private var histActiveFor: String? = null
+    private val histHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val histKeepAlive = object : Runnable {
+        override fun run() {
+            historyKeepAlive()
+            if (histActiveFor != null) histHandler.postDelayed(this, 2000)
         }
     }
 
-    private fun reportHistory(posMs: Long, force: Boolean = false) {
-        val s = histSession ?: return
+    private fun historyTick() {
+        val c = mediaController ?: return
+        val id = lastResolvedVideoId ?: return
+        if (!composeNav() || !dev.sparkynox.sparkytube.auth.Session.loggedIn || isResolving) return
         val now = android.os.SystemClock.elapsedRealtime()
-        if (!force && now - histLastReportMs < 30_000) return
-        val to = posMs / 1000.0
-        val from = histLastPosSec
-        if (to <= from) return
-        histLastReportMs = now
-        histLastPosSec = to
-        lifecycleScope.launch { dev.sparkynox.sparkytube.homefeed.InnerTubeClient.reportWatchTime(s, from, to) }
+        if (histVideoId != id) {
+            stopHistoryWeb(blank = true)
+            histVideoId = id
+            histPlayedMs = 0
+            histLastTick = now
+            return
+        }
+        if (c.isPlaying) histPlayedMs += (now - histLastTick).coerceAtMost(2000)
+        histLastTick = now
+        if (histActiveFor == null && histPlayedMs >= 30_000 && binding.nativeHomeFeedCompose.visibility == View.VISIBLE) {
+            histActiveFor = id
+            dev.sparkynox.sparkytube.logs.LogRecorder.i("History", "30s played, starting background player for $id")
+            webView.loadUrl("https://m.youtube.com/watch?v=$id")
+            histHandler.removeCallbacks(histKeepAlive)
+            histHandler.postDelayed(histKeepAlive, 2500)
+        }
+    }
+
+    private fun historyKeepAlive() {
+        val id = histActiveFor ?: return
+        if (id != lastResolvedVideoId || !isNativePlaybackActive) {
+            stopHistoryWeb(blank = true)
+            return
+        }
+        // user opened a channel / Shorts page in the WebView, it belongs to them now
+        if (binding.nativeHomeFeedCompose.visibility != View.VISIBLE) {
+            stopHistoryWeb(blank = false)
+            return
+        }
+        val playing = mediaController?.isPlaying == true
+        val pos = (mediaController?.currentPosition ?: 0L) / 1000
+        webView.evaluateJavascript(
+            "(function(play,pos){try{var v=document.querySelector('video');if(!v)return 'nov';" +
+                "v.muted=true;v.volume=0;" +
+                "var p=document.getElementById('movie_player')||document.querySelector('.html5-video-player')||document.getElementById('player');" +
+                "try{if(p&&p.setPlaybackQualityRange){p.setPlaybackQualityRange('tiny','tiny');}}catch(e){}" +
+                "if(!window.__sparkyHistSynced&&v.readyState>0){if(pos>3)v.currentTime=pos;window.__sparkyHistSynced=true;}" +
+                "if(play){if(v.paused)v.play();}else{if(!v.paused)v.pause();}" +
+                "return 'ok';}catch(e){return 'err';}})($playing,$pos)",
+            null
+        )
+    }
+
+    private fun stopHistoryWeb(blank: Boolean) {
+        val wasActive = histActiveFor != null
+        histActiveFor = null
+        histHandler.removeCallbacks(histKeepAlive)
+        if (wasActive && blank) webView.loadUrl("about:blank")
     }
 
     private fun maybeSaveWatchPosition() {
         if (!isNativePlaybackActive) return
         updateChapterLabel()
-        if (!isResolving) mediaController?.let { reportHistory(it.currentPosition) }
+        historyTick()
         ticksSinceLastPositionSave++
         if (ticksSinceLastPositionSave < 8) return
         ticksSinceLastPositionSave = 0
@@ -302,8 +341,6 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
 
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         emitPluginEvent(if (isPlaying) "play" else "pause", "{}")
-                        if (isPlaying) lastResolvedVideoId?.let { startHistory(it) }
-                        else if (!isResolving) mediaController?.let { reportHistory(it.currentPosition, force = true) }
                         // Screen-off during playback bug: Android's normal
                         // sleep timer doesn't know a video is playing
                         // (native ExoPlayer draws to its own SurfaceView,
@@ -1700,8 +1737,8 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
         var closeSheet: () -> Unit = { sheet.dismiss() }
 
         fun settingsAt(section: String) = {
-            startActivity(Intent(this, dev.sparkynox.sparkytube.settings.HtmlSettingsActivity::class.java)
-                .putExtra(dev.sparkynox.sparkytube.settings.HtmlSettingsActivity.EXTRA_OPEN_SECTION, section))
+            startActivity(Intent(this, dev.sparkynox.sparkytube.settings.SettingsComposeActivity::class.java)
+                .putExtra(dev.sparkynox.sparkytube.settings.SettingsComposeActivity.EXTRA_OPEN_SECTION, section))
         }
 
         val items = mutableListOf<Shortcut>()
@@ -2135,23 +2172,33 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
         }
     }
 
-    // checks our update server on app open. no dialog, just a small bar at the bottom
-    // that opens the update screen (the notification comes from UpdateManager)
+    // checks the latest GitHub release when the app opens. A newer version opens the update screen
+    // (with Later), a release marked [force] opens it without a way out
     private fun checkForUpdatesOnce() {
-        if (!dev.sparkynox.sparkytube.settings.SettingsPrefs.isUpdaterEnabled(this)) return
-
         lifecycleScope.launch {
-            dev.sparkynox.sparkytube.update.UpdateManager.backgroundCheck(this@MainActivity)
             val m = dev.sparkynox.sparkytube.update.UpdateManager
-            if (!m.hasUpdate(this@MainActivity) || isFinishing || isDestroyed) return@launch
-            if (dev.sparkynox.sparkytube.settings.SettingsPrefs.arePopupsBlocked(this@MainActivity)) return@launch
-            val l = m.latest ?: return@launch
-            com.google.android.material.snackbar.Snackbar
-                .make(binding.root, "SparkyTube ${l.versionName} is available", com.google.android.material.snackbar.Snackbar.LENGTH_LONG)
-                .setAction("Update") {
-                    startActivity(Intent(this@MainActivity, dev.sparkynox.sparkytube.update.UpdateActivity::class.java))
-                }
-                .show()
+            m.checkNow(this@MainActivity)
+            val l = m.latest
+            if (l == null || !m.hasUpdate(this@MainActivity) || isFinishing || isDestroyed) return@launch
+            val optIn = dev.sparkynox.sparkytube.settings.SettingsPrefs.isUpdaterEnabled(this@MainActivity) &&
+                !dev.sparkynox.sparkytube.settings.SettingsPrefs.arePopupsBlocked(this@MainActivity)
+            if (!l.mandatory && !optIn) return@launch
+            startActivity(
+                Intent(this@MainActivity, dev.sparkynox.sparkytube.update.UpdateActivity::class.java)
+                    .putExtra(dev.sparkynox.sparkytube.update.UpdateActivity.EXTRA_PROMPT, true)
+            )
+        }
+    }
+
+    // coming back from the update screen (or Home) with a mandatory update still pending: show it again
+    private fun reopenForcedUpdate() {
+        val m = dev.sparkynox.sparkytube.update.UpdateManager
+        val l = m.latest ?: return
+        if (l.mandatory && m.hasUpdate(this)) {
+            startActivity(
+                Intent(this, dev.sparkynox.sparkytube.update.UpdateActivity::class.java)
+                    .putExtra(dev.sparkynox.sparkytube.update.UpdateActivity.EXTRA_PROMPT, true)
+            )
         }
     }
 
@@ -2608,6 +2655,7 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
     private fun openWebPage(url: String) {
         if (browseMode != BrowseMode.YOUTUBE) return
         cancelWebViewLogin()
+        stopHistoryWeb(blank = false)
         leaveWatch()
         hideNativeHomeFeed()
         webView.loadUrl(url)
@@ -3569,6 +3617,7 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
     }
 
     override fun onResume() {
+        reopenForcedUpdate()
         super.onResume()
         webView.onResume()
         webView.resumeTimers()
