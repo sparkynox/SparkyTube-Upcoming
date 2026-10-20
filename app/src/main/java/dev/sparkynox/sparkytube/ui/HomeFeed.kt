@@ -138,7 +138,7 @@ fun HomeFeedScreen(
 }
 
 @Composable
-private fun AccountHeader(name: String, photo: String, loggedIn: Boolean, onClick: () -> Unit) {
+internal fun AccountHeader(name: String, photo: String, loggedIn: Boolean, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -161,7 +161,7 @@ private fun AccountHeader(name: String, photo: String, loggedIn: Boolean, onClic
 }
 
 @Composable
-private fun Avatar(url: String?, fallback: String, sizeDp: Int, modifier: Modifier = Modifier) {
+internal fun Avatar(url: String?, fallback: String, sizeDp: Int, modifier: Modifier = Modifier) {
     val shape = CircleShape
     Box(
         modifier.size(sizeDp.dp).clip(shape).background(MaterialTheme.colorScheme.primaryContainer),
@@ -180,7 +180,7 @@ private fun Avatar(url: String?, fallback: String, sizeDp: Int, modifier: Modifi
 }
 
 @Composable
-private fun LoginCard(onLogin: () -> Unit) {
+internal fun LoginCard(onLogin: () -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         shape = RoundedCornerShape(24.dp),
@@ -199,7 +199,7 @@ private fun LoginCard(onLogin: () -> Unit) {
 }
 
 @Composable
-private fun ErrorCard(msg: String, onRetry: () -> Unit) {
+internal fun ErrorCard(msg: String, onRetry: () -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         shape = RoundedCornerShape(24.dp),
@@ -215,7 +215,7 @@ private fun ErrorCard(msg: String, onRetry: () -> Unit) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun VideoCard(item: HomeFeedItem, onOpen: () -> Unit, onMore: () -> Unit) {
+internal fun VideoCard(item: HomeFeedItem, onOpen: () -> Unit, onMore: () -> Unit) {
     Column(
         Modifier.fillMaxWidth().combinedClickable(onClick = onOpen, onLongClick = onMore).padding(horizontal = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),

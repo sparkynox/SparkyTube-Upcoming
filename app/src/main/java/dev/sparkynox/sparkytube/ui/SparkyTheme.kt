@@ -76,7 +76,7 @@ private val LightScheme = lightColorScheme(
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SparkyTheme(content: @Composable () -> Unit) {
+fun SparkyTheme(fill: Boolean = true, content: @Composable () -> Unit) {
     val ctx = LocalContext.current
     // Settings > Appearance sets the app's night mode, which isSystemInDarkTheme() follows
     val dark = isSystemInDarkTheme()
@@ -95,7 +95,7 @@ fun SparkyTheme(content: @Composable () -> Unit) {
         typography = AppTypography,
     ) {
         Surface(
-            modifier = Modifier.fillMaxSize(),
+            modifier = if (fill) Modifier.fillMaxSize() else Modifier,
             color = MaterialTheme.colorScheme.background,
             contentColor = MaterialTheme.colorScheme.onBackground,
             content = content,
