@@ -216,6 +216,9 @@ internal fun ErrorCard(msg: String, onRetry: () -> Unit) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun VideoCard(item: HomeFeedItem, onOpen: () -> Unit, onMore: () -> Unit) {
+    val openChannel = LocalOpenChannel.current
+    val chId = item.channelId
+    val chTap = if (chId != null) Modifier.clickable { openChannel(chId) } else Modifier
     Column(
         Modifier.fillMaxWidth().combinedClickable(onClick = onOpen, onLongClick = onMore).padding(horizontal = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -239,7 +242,7 @@ internal fun VideoCard(item: HomeFeedItem, onOpen: () -> Unit, onMore: () -> Uni
             }
         }
         Row(Modifier.padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Avatar(item.channelAvatarUrl, item.channelName.ifBlank { "?" }, 36)
+            Avatar(item.channelAvatarUrl, item.channelName.ifBlank { "?" }, 36, chTap)
             Column(Modifier.weight(1f)) {
                 Text(
                     item.title,
@@ -251,6 +254,7 @@ internal fun VideoCard(item: HomeFeedItem, onOpen: () -> Unit, onMore: () -> Uni
                 val meta = listOf(item.channelName, item.viewCountText).filter { it.isNotBlank() }.joinToString(" • ")
                 if (meta.isNotBlank()) Text(
                     meta,
+                    modifier = chTap,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2, overflow = TextOverflow.Ellipsis,

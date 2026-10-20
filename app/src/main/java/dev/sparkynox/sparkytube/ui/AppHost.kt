@@ -3,6 +3,10 @@ package dev.sparkynox.sparkytube.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -53,6 +57,10 @@ import dev.sparkynox.sparkytube.R
 import dev.sparkynox.sparkytube.homefeed.FeedState
 import dev.sparkynox.sparkytube.homefeed.HomeFeedItem
 import dev.sparkynox.sparkytube.homefeed.HomeFeedViewModel
+import dev.sparkynox.sparkytube.homefeed.InnerTubeClient
+
+/** Cards and the watch screen call this to open a channel page. Provided by [AppHost]. */
+val LocalOpenChannel = staticCompositionLocalOf<(String) -> Unit> { {} }
 
 /**
  * Root of the app's Compose UI: whichever tab or sub-page is current, with the Watch screen laid
@@ -66,7 +74,9 @@ fun AppHost(
     onMore: (HomeFeedItem) -> Unit,
     onLogin: () -> Unit,
     onOpenDownloads: () -> Unit,
+    onChannel: (String) -> Unit = {},
 ) {
+    CompositionLocalProvider(LocalOpenChannel provides onChannel) {
     Box(Modifier.fillMaxSize()) {
         val page = nav.pages.lastOrNull()
         if (page != null) {
@@ -86,12 +96,17 @@ fun AppHost(
                 ShortsScreen(nav, onOpen)
             }
             NavViewModel.Tab.SUBS -> {
-                LaunchedEffect(home.loggedIn) { if (home.loggedIn) nav.subs.onShown() }
+                LaunchedEffect(home.loggedIn) { if (home.loggedIn) { nav.subs.onShown(); nav.loadSubChannels() } }
+                val strip = nav.subChannels.ifEmpty {
+                    nav.subs.items.filter { it.channelId != null }.distinctBy { it.channelId }
+                        .map { InnerTubeClient.ChannelItem(it.channelId!!, it.channelName, it.channelAvatarUrl) }
+                }
                 FeedScreen(
                     state = nav.subs, title = "Subscriptions", onBack = null,
                     needsLogin = !home.loggedIn, loggedIn = home.loggedIn,
                     emptyHint = "No new videos from your subscriptions.",
                     onOpen = onOpen, onMore = onMore, onLogin = onLogin,
+                    header = if (strip.isEmpty()) null else ({ ChannelStrip(strip, onChannel) }),
                 )
             }
             NavViewModel.Tab.LIBRARY -> LibraryScreen(
@@ -103,6 +118,7 @@ fun AppHost(
         }
 
         if (nav.watchVisible) WatchScreen(nav, onOpen = onOpen, onMore = onMore)
+    }
     }
 }
 
@@ -130,6 +146,7 @@ fun FeedScreen(
     onOpen: (HomeFeedItem) -> Unit,
     onMore: (HomeFeedItem) -> Unit,
     onLogin: () -> Unit,
+    header: (@Composable () -> Unit)? = null,
 ) {
     val list = rememberLazyListState()
     val nearEnd = rememberNearEnd(list)
@@ -159,6 +176,7 @@ fun FeedScreen(
                     )
                 }
             }
+            if (header != null && loggedIn) item(key = "header") { header() }
             if (needsLogin && !loggedIn) {
                 item(key = "login") { LoginCard(onLogin) }
             } else {
@@ -303,6 +321,27 @@ fun AppNavBar(selected: NavViewModel.Tab, onSelect: (NavViewModel.Tab) -> Unit) 
                 icon = { Icon(painterResource(icon), contentDescription = label) },
                 label = { Text(label) },
             )
+        }
+    }
+}
+
+@Composable
+internal fun ChannelStrip(channels: List<InnerTubeClient.ChannelItem>, onChannel: (String) -> Unit) {
+    LazyRow(
+        contentPadding = PaddingValues(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        items(channels, key = { it.id }) { c ->
+            Column(
+                Modifier.width(68.dp).clip(RoundedCornerShape(12.dp)).clickable { onChannel(c.id) },
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Avatar(c.avatar, c.name, 56)
+                Text(
+                    c.name, Modifier.padding(top = 4.dp),
+                    style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }

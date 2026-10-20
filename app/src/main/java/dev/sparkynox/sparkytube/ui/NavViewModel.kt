@@ -32,6 +32,18 @@ class NavViewModel : ViewModel() {
 
     val subs = FeedState(viewModelScope, FeedState.Source.Browse("FEsubscriptions"))
 
+    var subChannels by mutableStateOf<List<InnerTubeClient.ChannelItem>>(emptyList()); private set
+    private var subChannelsLoaded = false
+
+    fun loadSubChannels() {
+        if (subChannelsLoaded) return
+        subChannelsLoaded = true
+        viewModelScope.launch {
+            val r = InnerTubeClient.fetchSubscribedChannels()
+            if (r.isEmpty()) subChannelsLoaded = false else subChannels = r
+        }
+    }
+
     fun push(title: String, source: FeedState.Source) {
         pages.add(Page(title, FeedState(viewModelScope, source)))
     }
@@ -77,12 +89,16 @@ class NavViewModel : ViewModel() {
     private var relatedToken: String? = null
     private var watchJob: Job? = null
 
-    fun openWatch(videoId: String, title: String) {
+    var watchPlaylistId by mutableStateOf<String?>(null); private set
+    val queue: List<HomeFeedItem> get() = watchInfo?.queue ?: emptyList()
+
+    fun openWatch(videoId: String, title: String, playlistId: String? = null) {
         if (videoId == watchId && watchInfo != null) {
             watchVisible = true
             return
         }
         watchId = videoId
+        watchPlaylistId = playlistId
         watchTitle = title
         watchInfo = null
         related = emptyList()
@@ -91,7 +107,7 @@ class NavViewModel : ViewModel() {
 
         watchJob?.cancel()
         watchJob = viewModelScope.launch {
-            val info = InnerTubeClient.fetchWatch(videoId)
+            val info = InnerTubeClient.fetchWatch(videoId, playlistId)
             if (watchId != videoId) return@launch
             watchInfo = info
             related = info.related
@@ -129,5 +145,14 @@ class NavViewModel : ViewModel() {
     }
 
     /** What autoplay moves on to when the current video ends. */
-    fun nextVideo(): HomeFeedItem? = related.firstOrNull { it.videoId != null && it.videoId != watchId }
+    fun nextVideo(): HomeFeedItem? {
+        val q = queue
+        if (q.isNotEmpty()) {
+            val i = q.indexOfFirst { it.videoId == watchId }
+            q.getOrNull(i + 1)?.let { return it }
+        }
+        return nextRelated()
+    }
+
+    private fun nextRelated(): HomeFeedItem? = related.firstOrNull { it.videoId != null && it.videoId != watchId }
 }
