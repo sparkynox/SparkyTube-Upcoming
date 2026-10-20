@@ -2671,7 +2671,14 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
     private var loginInProgress = false
     private var loginTicks = 0
     private val loginHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private val loginUrl = "https://m.youtube.com/signin?action_handle_signin=true&app=m&next=%2F"
+    // the signed-out Library page has YouTube's own Sign in button, that link starts a proper Google flow
+    private val loginUrl = "https://m.youtube.com/feed/library"
+    private val loginFallbackUrl =
+        "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&continue=" +
+            "https%3A%2F%2Fm.youtube.com%2Ffeed%2Flibrary"
+    private val clickSignInJs =
+        "(function(){try{var a=document.querySelector('a[href*=\"accounts.google.com\"]');" +
+            "if(a){location.href=a.href;return 'go';}return '';}catch(e){return '';}})()"
     private val loginConfigJs =
         "(function(){try{var g=function(k){try{return window.ytcfg.get(k)}catch(e){return null}};" +
             "return JSON.stringify({v:g('VISITOR_DATA')||'',d:g('DATASYNC_ID')||'',c:g('INNERTUBE_CLIENT_VERSION')||''});}" +
@@ -2690,6 +2697,7 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
         leaveWatch()
         loginInProgress = true
         loginTicks = 0
+        loginNavTries = 0
         hideNativeHomeFeed() // shows the WebView
         webView.loadUrl(loginUrl)
         dev.sparkynox.sparkytube.logs.LogRecorder.i("Login", "login started in the main WebView")
@@ -2703,10 +2711,24 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
         loginHandler.removeCallbacks(loginWatcher)
     }
 
+    private var loginNavTries = 0
+
     private fun checkLoginDone() {
         val cm = android.webkit.CookieManager.getInstance()
-        val cookie = cm.getCookie(dev.sparkynox.sparkytube.auth.Session.ORIGIN) ?: return
-        if (!cookie.contains("SAPISID=")) return
+        val cookie = cm.getCookie(dev.sparkynox.sparkytube.auth.Session.ORIGIN)
+        if (cookie == null || !cookie.contains("SAPISID=")) {
+            // still on the signed-out Library page: press its Sign in link for the user
+            val u = webView.url.orEmpty()
+            if (u.startsWith("https://m.youtube.com/feed/library")) {
+                loginNavTries++
+                if (loginNavTries == 12) {
+                    webView.loadUrl(loginFallbackUrl)
+                } else if (loginNavTries < 12) {
+                    webView.evaluateJavascript(clickSignInJs, null)
+                }
+            }
+            return
+        }
         // wait until Google has sent us back to YouTube so ytcfg (visitor data etc.) exists
         val url = webView.url ?: return
         if (!url.startsWith("https://m.youtube.com") && !url.startsWith("https://www.youtube.com")) return
