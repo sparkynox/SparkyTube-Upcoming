@@ -32,8 +32,6 @@ data class AccountInfo(val name: String, val handle: String?, val photo: String?
  *  - a logged out request still returns the generic feed rather than nothing
  */
 object InnerTubeClient {
-    private const val CPN_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-
     private const val ORIGIN = Session.ORIGIN
     private const val BASE_URL = "$ORIGIN/youtubei/v1"
 
@@ -298,62 +296,6 @@ object InnerTubeClient {
             LogRecorder.w(TAG, "channel list failed: ${e.message}")
             emptyList()
         }
-    }
-
-    // ---------- watch history
-    // Tells YouTube what was really played in the native player (start, then the range actually
-    // watched), the same pings the web player sends. Nothing is sent for videos that aren't playing.
-
-    class PlaybackSession(val cpn: String, val watchtimeUrl: String?)
-
-    suspend fun startPlayback(videoId: String): PlaybackSession? = withContext(Dispatchers.IO) {
-        if (!Session.loggedIn) return@withContext null
-        try {
-            val root = post("player", JSONObject().put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true))
-            val status = root.optJSONObject("playabilityStatus")?.optString("status")
-            val tracking = root.optJSONObject("playbackTracking")
-            if (tracking == null) {
-                LogRecorder.w(TAG, "history: no playbackTracking for $videoId (playability=$status)")
-                return@withContext null
-            }
-            val start = tracking.optJSONObject("videostatsPlaybackUrl")?.optString("baseUrl")?.takeIf { it.isNotBlank() }
-            if (start == null) {
-                LogRecorder.w(TAG, "history: no videostatsPlaybackUrl for $videoId (playability=$status)")
-                return@withContext null
-            }
-            val watch = tracking.optJSONObject("videostatsWatchtimeUrl")?.optString("baseUrl")?.takeIf { it.isNotBlank() }
-            val cpn = (1..16).map { CPN_ALPHABET.random() }.joinToString("")
-            val code = ping("$start&ver=2&c=WEB&cpn=$cpn&cmt=0")
-            LogRecorder.d(TAG, "history: start ping for $videoId -> HTTP $code (watchtime url=${watch != null})")
-            PlaybackSession(cpn, watch)
-        } catch (e: Exception) {
-            LogRecorder.w(TAG, "history start failed: ${e.message}")
-            null
-        }
-    }
-
-    suspend fun reportWatchTime(s: PlaybackSession, fromSec: Double, toSec: Double) = withContext(Dispatchers.IO) {
-        val url = s.watchtimeUrl ?: return@withContext
-        try {
-            val code = ping("$url&ver=2&c=WEB&cpn=${s.cpn}&cmt=$toSec&st=$fromSec&et=$toSec&state=playing")
-            LogRecorder.d(TAG, "history: watchtime ${fromSec.toInt()}s-${toSec.toInt()}s -> HTTP $code")
-        } catch (e: Exception) {
-            LogRecorder.w(TAG, "history ping failed: ${e.message}")
-        }
-    }
-
-    private fun ping(url: String): Int {
-        val rb = Request.Builder().url(url).get()
-            .header("User-Agent", UA)
-            .header("Origin", ORIGIN)
-            .header("Referer", "$ORIGIN/")
-        val cookie = Session.cookie
-        val sapisid = Session.sapisid()
-        if (cookie != null && sapisid != null) {
-            rb.header("Cookie", cookie)
-            rb.header("Authorization", sapisidHash(sapisid))
-        }
-        return http.newCall(rb.build()).execute().use { it.code }
     }
 
     // ---------- request
