@@ -175,9 +175,42 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
         val s = total % 60
         return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
     }
+    // ---------- watch history for the native player (real play only)
+    private var histSession: dev.sparkynox.sparkytube.homefeed.InnerTubeClient.PlaybackSession? = null
+    private var histVideoId: String? = null
+    private var histLastReportMs = 0L
+    private var histLastPosSec = 0.0
+
+    private fun startHistory(videoId: String) {
+        if (!composeNav() || !dev.sparkynox.sparkytube.auth.Session.loggedIn || histVideoId == videoId) return
+        histVideoId = videoId
+        histSession = null
+        lifecycleScope.launch {
+            val s = dev.sparkynox.sparkytube.homefeed.InnerTubeClient.startPlayback(videoId)
+            if (histVideoId == videoId) {
+                histSession = s
+                histLastReportMs = android.os.SystemClock.elapsedRealtime()
+                histLastPosSec = (mediaController?.currentPosition ?: 0L) / 1000.0
+            }
+        }
+    }
+
+    private fun reportHistory(posMs: Long, force: Boolean = false) {
+        val s = histSession ?: return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - histLastReportMs < 30_000) return
+        val to = posMs / 1000.0
+        val from = histLastPosSec
+        if (to <= from) return
+        histLastReportMs = now
+        histLastPosSec = to
+        lifecycleScope.launch { dev.sparkynox.sparkytube.homefeed.InnerTubeClient.reportWatchTime(s, from, to) }
+    }
+
     private fun maybeSaveWatchPosition() {
         if (!isNativePlaybackActive) return
         updateChapterLabel()
+        if (!isResolving) mediaController?.let { reportHistory(it.currentPosition) }
         ticksSinceLastPositionSave++
         if (ticksSinceLastPositionSave < 8) return
         ticksSinceLastPositionSave = 0
@@ -269,6 +302,8 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
 
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         emitPluginEvent(if (isPlaying) "play" else "pause", "{}")
+                        if (isPlaying) lastResolvedVideoId?.let { startHistory(it) }
+                        else if (!isResolving) mediaController?.let { reportHistory(it.currentPosition, force = true) }
                         // Screen-off during playback bug: Android's normal
                         // sleep timer doesn't know a video is playing
                         // (native ExoPlayer draws to its own SurfaceView,
@@ -1302,7 +1337,7 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
             val next = nav.nextVideo()
             val nextId = next?.videoId
             if (next != null && nextId != null) {
-                openVideo(nextId, next.title)
+                openVideo(nextId, next.title, next.playlistId)
             } else {
                 stopNativePlayback()
                 nav.closeWatch()
@@ -1388,7 +1423,12 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
                             showComposeHost()
                         }
                         // the WebView is showing (YouTube settings): back goes to the app, not WebView history
-                        binding.nativeHomeFeedCompose.visibility != View.VISIBLE -> showComposeHost()
+                        binding.nativeHomeFeedCompose.visibility != View.VISIBLE -> {
+                            if (nav.tab == dev.sparkynox.sparkytube.ui.NavViewModel.Tab.SHORTS) {
+                                nav.tab = dev.sparkynox.sparkytube.ui.NavViewModel.Tab.HOME
+                            }
+                            showComposeHost()
+                        }
                         nav.watchVisible -> leaveWatch()
                         nav.pop() -> Unit
                         nav.tab != dev.sparkynox.sparkytube.ui.NavViewModel.Tab.HOME ->
@@ -2468,6 +2508,10 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
         leaveWatch()
         nav.pages.clear()
         nav.tab = tab
+        if (tab == dev.sparkynox.sparkytube.ui.NavViewModel.Tab.SHORTS) {
+            openWebPage("https://m.youtube.com/shorts")
+            return
+        }
         showComposeHost()
     }
 
@@ -2540,6 +2584,7 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
                     onOpen = { openFeedItem(it) },
                     onMore = { showFeedDownloadDialog(it) },
                     onLogin = { startWebViewLogin() },
+                    onChannel = { openChannel(it) },
                     onOpenDownloads = {
                         startActivity(Intent(this, dev.sparkynox.sparkytube.download.OfflineLibraryActivity::class.java))
                     },
@@ -2550,15 +2595,33 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
 
     private fun showComposeHost() {
         ensureComposeHost()
+        // a Short or channel page may still be playing in the WebView, stop it before hiding
+        if (webView.visibility == View.VISIBLE) {
+            webView.evaluateJavascript("document.querySelectorAll('video').forEach(function(v){v.pause()})", null)
+        }
         binding.nativeHomeFeedCompose.visibility = View.VISIBLE
         webView.visibility = View.INVISIBLE
     }
 
+    // Shorts and channel pages are YouTube's own mobile pages (real HTML5 player, subscribe, tabs).
+    // Back or any tab goes back to the Compose screens.
+    private fun openWebPage(url: String) {
+        if (browseMode != BrowseMode.YOUTUBE) return
+        cancelWebViewLogin()
+        leaveWatch()
+        hideNativeHomeFeed()
+        webView.loadUrl(url)
+    }
+
+    private fun openChannel(channelId: String) = openWebPage("https://m.youtube.com/channel/$channelId")
+
     private fun openFeedItem(item: dev.sparkynox.sparkytube.homefeed.HomeFeedItem) {
         val videoId = item.videoId
         val playlistId = item.playlistId
-        if (videoId != null) {
-            openVideo(videoId, item.title)
+        if (videoId != null && item.isShort) {
+            openWebPage("https://m.youtube.com/shorts/$videoId")
+        } else if (videoId != null) {
+            openVideo(videoId, item.title, playlistId)
         } else if (playlistId != null) {
             nav.push(
                 item.title.ifBlank { "Playlist" },
@@ -2569,8 +2632,8 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
         }
     }
 
-    private fun openVideo(videoId: String, title: String) {
-        nav.openWatch(videoId, title)
+    private fun openVideo(videoId: String, title: String, playlistId: String? = null) {
+        nav.openWatch(videoId, title, playlistId)
         if (videoId == lastResolvedVideoId && isNativePlaybackActive) {
             // already playing (e.g. from the mini-player), just bring it back up
             if (isMiniPlayerActive) exitMiniPlayerMode()
@@ -3316,8 +3379,20 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
 
     private fun checkCurrentUrlForVideo() {
         if (browseMode != BrowseMode.YOUTUBE) return
-        // The Compose UI opens videos itself; the hidden WebView's URL says nothing about what is playing
-        if (composeNav()) return
+        // The Compose UI opens videos itself. The one exception is the WebView being shown (channel page):
+        // a video tapped there is handed to the native player and the page steps back.
+        if (composeNav()) {
+            if (binding.nativeHomeFeedCompose.visibility != View.VISIBLE && !loginInProgress) {
+                val id = webView.url?.let { extractVideoId(it) }
+                if (id != null) {
+                    webView.evaluateJavascript("document.querySelectorAll('video').forEach(function(v){v.pause()})", null)
+                    if (webView.canGoBack()) webView.goBack()
+                    showComposeHost()
+                    openVideo(id, "")
+                }
+            }
+            return
+        }
         val currentUrl = webView.url ?: return
         val videoId = extractVideoId(currentUrl)
 
