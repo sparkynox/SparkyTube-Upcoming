@@ -7,11 +7,6 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.ViewGroup
 import android.webkit.CookieManager
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebSettings
-import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.LinearLayout
@@ -31,7 +26,6 @@ import org.json.JSONTokener
 class LoginActivity : AppCompatActivity() {
 
     private var done = false
-    private lateinit var web: WebView
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -57,13 +51,6 @@ class LoginActivity : AppCompatActivity() {
             textSize = 18f
         }, LinearLayout.LayoutParams(0, (52 * dp).toInt(), 1f).apply { gravity = Gravity.CENTER_VERTICAL })
         bar.addView(TextView(this).apply {
-            text = "Reload"
-            setTextColor(fg)
-            textSize = 15f
-            setPadding((12 * dp).toInt(), (12 * dp).toInt(), (12 * dp).toInt(), (12 * dp).toInt())
-            setOnClickListener { restart() }
-        })
-        bar.addView(TextView(this).apply {
             text = "Close"
             setTextColor(getColor(R.color.accent))
             textSize = 15f
@@ -72,52 +59,32 @@ class LoginActivity : AppCompatActivity() {
         })
         root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        web = WebView(this)
-        web.setBackgroundColor(Color.TRANSPARENT)
-        web.isFocusable = true
-        web.isFocusableInTouchMode = true
-        web.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            databaseEnabled = true
-            javaScriptCanOpenWindowsAutomatically = true
-            setSupportMultipleWindows(false)
-            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-            // same trick LunoMusic uses: only drop the "; wv" marker. extra tokens or a fake
-            // Chrome string made google hang the Next button on the identifier page
-            userAgentString = userAgentString.replace("; wv", "")
-        }
+        val web = WebView(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            
+            // Fixed: Overriding with a complete, modern Chrome User-Agent string.
+            // Removing "; wv" is no longer enough to bypass Google's strict environment verification.
+            settings.userAgentString = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
 
-        // Google's sign-in hops between accounts.google.com and youtube.com and needs cross-site cookies
-        val cookies = CookieManager.getInstance()
-        cookies.setAcceptCookie(true)
-        cookies.setAcceptThirdPartyCookies(web, true)
+            // start from a clean jar so the account picker always shows
+            CookieManager.getInstance().removeAllCookies(null)
+            CookieManager.getInstance().flush()
 
-        web.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
-                LogRecorder.d("Login", "page started: ${url?.substringBefore('?')}")
-            }
-
-            override fun onPageFinished(view: WebView, url: String?) {
-                LogRecorder.d("Login", "page finished: ${url?.substringBefore('?')}")
-                if (done || url == null) return
-                if (url.startsWith("https://m.youtube.com") || url.startsWith("https://www.youtube.com")) poll(view, url, 0)
-            }
-
-            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-                if (request.isForMainFrame) {
-                    LogRecorder.w("Login", "main frame error ${error.errorCode}: ${error.description} (${request.url.host})")
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView, url: String?) {
+                    if (done || url == null) return
+                    if (url.startsWith("https://m.youtube.com") || url.startsWith("https://www.youtube.com")) poll(view, url, 0)
                 }
             }
-
-            override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
-                if (request.isForMainFrame) {
-                    LogRecorder.w("Login", "HTTP ${errorResponse.statusCode} on ${request.url.host}")
-                }
+            
+            // Fixed: Added extra headers to drop the X-Requested-With header, reducing WebView fingerprint tracing.
+            val extraHeaders = HashMap<String, String>().apply {
+                put("X-Requested-With", "")
             }
+            loadUrl("https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fm.youtube.com%2F", extraHeaders)
         }
-
-        restart()
         root.addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
 
@@ -126,20 +93,6 @@ class LoginActivity : AppCompatActivity() {
                 if (web.canGoBack()) web.goBack() else finish()
             }
         })
-    }
-
-    // wipes everything google may have left from an earlier try, then loads the sign-in page.
-    // old localStorage/indexeddb with fresh cookies was the mismatch that left Next loading forever
-    private fun restart() {
-        val cookies = CookieManager.getInstance()
-        web.stopLoading()
-        WebStorage.getInstance().deleteAllData()
-        web.clearCache(true)
-        web.clearHistory()
-        cookies.removeAllCookies {
-            cookies.flush()
-            web.loadUrl(SIGN_IN_URL)
-        }
     }
 
     // ytcfg is not always ready right when the page finishes, so retry a few times
@@ -170,13 +123,6 @@ class LoginActivity : AppCompatActivity() {
     }
 
     private companion object {
-        // YouTube-initiated sign-in: after the Google login, youtube.com's own /signin?action_handle_signin
-        // step runs and sets the YouTube cookies (SAPISID), which a plain "continue" to m.youtube.com does not
-        const val SIGN_IN_URL =
-            "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true" +
-                "&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue" +
-                "%26app%3Dm%26hl%3Den%26next%3Dhttps%253A%252F%252Fm.youtube.com%252F"
-
         const val GET_CONFIG =
             "(function(){try{var g=function(k){try{return window.ytcfg.get(k)}catch(e){return null}};" +
                 "return JSON.stringify({v:g('VISITOR_DATA')||'',d:g('DATASYNC_ID')||'',c:g('INNERTUBE_CLIENT_VERSION')||''});}" +
