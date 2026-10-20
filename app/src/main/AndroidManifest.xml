@@ -27,6 +27,7 @@
         <activity
             android:name=".auth.LoginActivity"
             android:exported="false"
+            android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.SparkyTube.NoActionBar" />
 
         <activity
