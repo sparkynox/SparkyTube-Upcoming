@@ -14,5 +14,7 @@ data class HomeFeedItem(
     // playlist doesn't have a single duration the way one video does).
     val itemCountText: String? = null,
     // Shorts (9:16) -- only produced by InnerTubeClient.fetchShorts, never mixed into the normal feeds
-    val isShort: Boolean = false
+    val isShort: Boolean = false,
+    // channel page id (UC...), null when the renderer doesn't carry one
+    val channelId: String? = null
 )

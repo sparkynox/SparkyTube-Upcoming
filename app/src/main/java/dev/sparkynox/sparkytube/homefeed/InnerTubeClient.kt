@@ -32,6 +32,7 @@ data class AccountInfo(val name: String, val handle: String?, val photo: String?
  *  - a logged out request still returns the generic feed rather than nothing
  */
 object InnerTubeClient {
+    private const val CPN_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
     private const val ORIGIN = Session.ORIGIN
     private const val BASE_URL = "$ORIGIN/youtubei/v1"
@@ -167,12 +168,18 @@ object InnerTubeClient {
         val related: List<HomeFeedItem>,
         val continuation: String?,
         val error: String? = null,
+        val channelId: String? = null,
+        val subscribed: Boolean = false,
+        val queue: List<HomeFeedItem> = emptyList(),
+        val queueTitle: String? = null,
     )
 
     /** Everything under the player on a watch page: title, channel, description and the related list. */
-    suspend fun fetchWatch(videoId: String): WatchInfo = withContext(Dispatchers.IO) {
+    suspend fun fetchWatch(videoId: String, playlistId: String? = null): WatchInfo = withContext(Dispatchers.IO) {
         try {
-            val root = post("next", JSONObject().put("videoId", videoId))
+            val body = JSONObject().put("videoId", videoId)
+            if (playlistId != null) body.put("playlistId", playlistId)
+            val root = post("next", body)
             val primary = findFirst(root, "videoPrimaryInfoRenderer")
             val secondary = findFirst(root, "videoSecondaryInfoRenderer")
             val owner = secondary?.optJSONObject("owner")?.optJSONObject("videoOwnerRenderer")
@@ -195,6 +202,10 @@ object InnerTubeClient {
                 description = desc,
                 related = related.filter { it.videoId != videoId }.distinctBy { it.videoId ?: it.playlistId },
                 continuation = findContinuationToken(results),
+                channelId = owner?.let { findChannelId(it) },
+                subscribed = owner?.let { findFirst(it, "subscribeButtonRenderer") }?.optBoolean("subscribed", false) ?: false,
+                queue = if (playlistId != null) parseQueue(root, playlistId) else emptyList(),
+                queueTitle = if (playlistId != null) findFirst(root, "playlist")?.optJSONObject("playlist")?.optString("title")?.takeIf { it.isNotBlank() } else null,
             )
             LogRecorder.d(TAG, "watch $videoId: title=${info.title != null}, channel=${info.channelName != null}, related=${info.related.size}")
             info
@@ -202,6 +213,138 @@ object InnerTubeClient {
             LogRecorder.w(TAG, "watch info failed for $videoId", e)
             WatchInfo(null, null, null, null, null, null, emptyList(), null, e.message ?: "couldn't load")
         }
+    }
+
+    // the playlist / mix panel next to a watch page
+    private fun parseQueue(root: JSONObject, playlistId: String): List<HomeFeedItem> {
+        val out = ArrayList<HomeFeedItem>()
+        fun walk(n: Any?) {
+            when (n) {
+                is JSONObject -> {
+                    n.optJSONObject("playlistPanelVideoRenderer")?.let { r ->
+                        val id = r.optString("videoId").takeIf { it.isNotBlank() } ?: return@let
+                        val title = text(r.optJSONObject("title")) ?: return@let
+                        out.add(
+                            HomeFeedItem(
+                                videoId = id, playlistId = playlistId, title = title,
+                                channelName = text(r.optJSONObject("shortBylineText")) ?: "",
+                                thumbnailUrl = lastThumb(r.optJSONObject("thumbnail")?.optJSONArray("thumbnails")) ?: "",
+                                durationText = text(r.optJSONObject("lengthText")) ?: "",
+                                viewCountText = "",
+                                channelId = findChannelId(r),
+                            )
+                        )
+                    }
+                    n.keys().forEach { walk(n.opt(it)) }
+                }
+                is JSONArray -> for (i in 0 until n.length()) walk(n.opt(i))
+            }
+        }
+        walk(root)
+        return out.distinctBy { it.videoId }
+    }
+
+    // ---------- actions (need a signed in session)
+
+    private suspend fun action(path: String, body: JSONObject): Boolean = withContext(Dispatchers.IO) {
+        if (!Session.loggedIn) return@withContext false
+        try {
+            post(path, body)
+            true
+        } catch (e: Exception) {
+            LogRecorder.w(TAG, "$path failed: ${e.message}")
+            false
+        }
+    }
+
+    suspend fun like(videoId: String) = action("like/like", JSONObject().put("target", JSONObject().put("videoId", videoId)))
+    suspend fun dislike(videoId: String) = action("like/dislike", JSONObject().put("target", JSONObject().put("videoId", videoId)))
+    suspend fun removeLike(videoId: String) = action("like/removelike", JSONObject().put("target", JSONObject().put("videoId", videoId)))
+    suspend fun subscribe(channelId: String) =
+        action("subscription/subscribe", JSONObject().put("channelIds", JSONArray().put(channelId)).put("params", "EgIIAhgA"))
+    suspend fun unsubscribe(channelId: String) =
+        action("subscription/unsubscribe", JSONObject().put("channelIds", JSONArray().put(channelId)).put("params", "CgIIAhgA"))
+
+    // ---------- subscribed channels (the avatar strip on the Subs tab)
+
+    data class ChannelItem(val id: String, val name: String, val avatar: String?)
+
+    suspend fun fetchSubscribedChannels(): List<ChannelItem> = withContext(Dispatchers.IO) {
+        if (!Session.loggedIn) return@withContext emptyList()
+        try {
+            val root = post("browse", JSONObject().put("browseId", "FEchannels"))
+            val out = LinkedHashMap<String, ChannelItem>()
+            fun walk(n: Any?) {
+                when (n) {
+                    is JSONObject -> {
+                        n.optJSONObject("channelRenderer")?.let { r ->
+                            val id = r.optString("channelId").takeIf { it.isNotBlank() }
+                            val name = text(r.optJSONObject("title"))
+                            if (id != null && name != null) {
+                                val av = lastThumb(r.optJSONObject("thumbnail")?.optJSONArray("thumbnails"))
+                                    ?.let { if (it.startsWith("//")) "https:$it" else it }
+                                out[id] = ChannelItem(id, name, av)
+                            }
+                        }
+                        n.keys().forEach { walk(n.opt(it)) }
+                    }
+                    is JSONArray -> for (i in 0 until n.length()) walk(n.opt(i))
+                }
+            }
+            walk(root)
+            LogRecorder.d(TAG, "subscribed channels: ${out.size}")
+            out.values.toList()
+        } catch (e: Exception) {
+            LogRecorder.w(TAG, "channel list failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    // ---------- watch history
+    // Tells YouTube what was really played in the native player (start, then the range actually
+    // watched), the same pings the web player sends. Nothing is sent for videos that aren't playing.
+
+    class PlaybackSession(val cpn: String, val watchtimeUrl: String?)
+
+    suspend fun startPlayback(videoId: String): PlaybackSession? = withContext(Dispatchers.IO) {
+        if (!Session.loggedIn) return@withContext null
+        try {
+            val root = post("player", JSONObject().put("videoId", videoId).put("contentCheckOk", true).put("racyCheckOk", true))
+            val tracking = root.optJSONObject("playbackTracking") ?: return@withContext null
+            val start = tracking.optJSONObject("videostatsPlaybackUrl")?.optString("baseUrl")?.takeIf { it.isNotBlank() }
+                ?: return@withContext null
+            val watch = tracking.optJSONObject("videostatsWatchtimeUrl")?.optString("baseUrl")?.takeIf { it.isNotBlank() }
+            val cpn = (1..16).map { CPN_ALPHABET.random() }.joinToString("")
+            ping("$start&ver=2&c=WEB&cpn=$cpn&cmt=0")
+            LogRecorder.d(TAG, "history: playback registered for $videoId")
+            PlaybackSession(cpn, watch)
+        } catch (e: Exception) {
+            LogRecorder.w(TAG, "history start failed: ${e.message}")
+            null
+        }
+    }
+
+    suspend fun reportWatchTime(s: PlaybackSession, fromSec: Double, toSec: Double) = withContext(Dispatchers.IO) {
+        val url = s.watchtimeUrl ?: return@withContext
+        try {
+            ping("$url&ver=2&c=WEB&cpn=${s.cpn}&cmt=$toSec&st=$fromSec&et=$toSec&state=playing")
+        } catch (e: Exception) {
+            LogRecorder.w(TAG, "history ping failed: ${e.message}")
+        }
+    }
+
+    private fun ping(url: String) {
+        val rb = Request.Builder().url(url).get()
+            .header("User-Agent", UA)
+            .header("Origin", ORIGIN)
+            .header("Referer", "$ORIGIN/")
+        val cookie = Session.cookie
+        val sapisid = Session.sapisid()
+        if (cookie != null && sapisid != null) {
+            rb.header("Cookie", cookie)
+            rb.header("Authorization", sapisidHash(sapisid))
+        }
+        http.newCall(rb.build()).execute().use { /* response body not needed */ }
     }
 
     // ---------- request
@@ -311,7 +454,20 @@ object InnerTubeClient {
             channelAvatarUrl = avatar,
             durationText = duration,
             viewCountText = listOf(views, age).filter { it.isNotBlank() }.joinToString(" • "),
+            channelId = findChannelId(r),
         )
+    }
+
+    // first browseEndpoint under the node that points at a channel (UC...)
+    private fun findChannelId(node: Any?): String? {
+        when (node) {
+            is JSONObject -> {
+                node.optJSONObject("browseEndpoint")?.optString("browseId")?.takeIf { it.startsWith("UC") }?.let { return it }
+                node.keys().forEach { k -> findChannelId(node.opt(k))?.let { return it } }
+            }
+            is JSONArray -> for (i in 0 until node.length()) findChannelId(node.opt(i))?.let { return it }
+        }
+        return null
     }
 
     // YouTube's newer card layout. Written from the response shape, so it is deliberately lenient.
@@ -342,10 +498,10 @@ object InnerTubeClient {
             ?.optJSONObject("image")?.optJSONArray("sources")?.optJSONObject(0)?.optString("url")?.takeIf { it.isNotBlank() }
 
         return if (isVideo) {
-            HomeFeedItem(id, null, title, channel, thumb, avatar, badge ?: "", rest)
+            HomeFeedItem(id, null, title, channel, thumb, avatar, badge ?: "", rest, channelId = findChannelId(l))
         } else {
             val firstVideo = findFirst(l, "watchEndpoint")?.optString("videoId")?.takeIf { it.length == 11 }
-            HomeFeedItem(firstVideo, id, title, channel, thumb, avatar, "", rest, itemCountText = badge)
+            HomeFeedItem(firstVideo, id, title, channel, thumb, avatar, "", rest, itemCountText = badge, channelId = findChannelId(l))
         }
     }
 
