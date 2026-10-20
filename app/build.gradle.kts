@@ -146,6 +146,7 @@ dependencies {
     implementation("androidx.compose.material3:material3:1.5.0-alpha01")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material:material-icons-core")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.0.4")
 
     // InMobi — powers the optional "Support the Developer" rewarded-ad
