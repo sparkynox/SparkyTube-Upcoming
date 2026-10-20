@@ -1383,6 +1383,10 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
                 }
                 if (composeNav() && browseMode == BrowseMode.YOUTUBE) {
                     when {
+                        loginInProgress -> {
+                            cancelWebViewLogin()
+                            showComposeHost()
+                        }
                         // the WebView is showing (YouTube settings): back goes to the app, not WebView history
                         binding.nativeHomeFeedCompose.visibility != View.VISIBLE -> showComposeHost()
                         nav.watchVisible -> leaveWatch()
@@ -2460,6 +2464,7 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
             )
             return
         }
+        cancelWebViewLogin()
         leaveWatch()
         nav.pages.clear()
         nav.tab = tab
@@ -2534,7 +2539,7 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
                     home = homeFeedVm,
                     onOpen = { openFeedItem(it) },
                     onMore = { showFeedDownloadDialog(it) },
-                    onLogin = { loginLauncher.launch(Intent(this, dev.sparkynox.sparkytube.auth.LoginActivity::class.java)) },
+                    onLogin = { startWebViewLogin() },
                     onOpenDownloads = {
                         startActivity(Intent(this, dev.sparkynox.sparkytube.download.OfflineLibraryActivity::class.java))
                     },
@@ -2591,6 +2596,81 @@ class MainActivity : AppCompatActivity(), JsBridge.VideoStateListener {
             isResolving = false
             binding.loadingSpinner.visibility = View.GONE
             nav.closeWatch()
+        }
+    }
+
+    // ---------- login: through the main WebView, exactly like the old (non-Compose) app
+    //
+    // A separate login screen kept getting stuck on Google's identifier page, while the main WebView
+    // (the one the whole app browses with) signs in fine. So login simply shows that WebView on
+    // YouTube's sign-in page, and a watcher waits for the YouTube cookies to appear in the shared
+    // CookieManager. auth/Session reads that same jar, so nothing has to be copied around.
+    private var loginInProgress = false
+    private var loginTicks = 0
+    private val loginHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val loginUrl = "https://m.youtube.com/signin?action_handle_signin=true&app=m&next=%2F"
+    private val loginConfigJs =
+        "(function(){try{var g=function(k){try{return window.ytcfg.get(k)}catch(e){return null}};" +
+            "return JSON.stringify({v:g('VISITOR_DATA')||'',d:g('DATASYNC_ID')||'',c:g('INNERTUBE_CLIENT_VERSION')||''});}" +
+            "catch(e){return '';}})()"
+
+    private val loginWatcher = object : Runnable {
+        override fun run() {
+            if (!loginInProgress) return
+            checkLoginDone()
+            loginHandler.postDelayed(this, 800)
+        }
+    }
+
+    private fun startWebViewLogin() {
+        if (browseMode != BrowseMode.YOUTUBE) return
+        leaveWatch()
+        loginInProgress = true
+        loginTicks = 0
+        hideNativeHomeFeed() // shows the WebView
+        webView.loadUrl(loginUrl)
+        dev.sparkynox.sparkytube.logs.LogRecorder.i("Login", "login started in the main WebView")
+        android.widget.Toast.makeText(this, "Sign in to YouTube. You'll come back here automatically.", android.widget.Toast.LENGTH_LONG).show()
+        loginHandler.removeCallbacks(loginWatcher)
+        loginHandler.postDelayed(loginWatcher, 1000)
+    }
+
+    private fun cancelWebViewLogin() {
+        loginInProgress = false
+        loginHandler.removeCallbacks(loginWatcher)
+    }
+
+    private fun checkLoginDone() {
+        val cm = android.webkit.CookieManager.getInstance()
+        val cookie = cm.getCookie(dev.sparkynox.sparkytube.auth.Session.ORIGIN) ?: return
+        if (!cookie.contains("SAPISID=")) return
+        // wait until Google has sent us back to YouTube so ytcfg (visitor data etc.) exists
+        val url = webView.url ?: return
+        if (!url.startsWith("https://m.youtube.com") && !url.startsWith("https://www.youtube.com")) return
+
+        loginTicks++
+        webView.evaluateJavascript(loginConfigJs) { raw ->
+            if (!loginInProgress) return@evaluateJavascript
+            val cfg = runCatching {
+                org.json.JSONObject(org.json.JSONTokener(raw).nextValue() as String)
+            }.getOrNull()
+            val visitor = cfg?.optString("v").orEmpty()
+            // ytcfg can lag a moment behind the page; after ~6s go on without it (it is optional)
+            if (visitor.isEmpty() && loginTicks < 8) return@evaluateJavascript
+
+            cancelWebViewLogin()
+            dev.sparkynox.sparkytube.auth.Session.save(
+                cookie = cm.getCookie(dev.sparkynox.sparkytube.auth.Session.ORIGIN) ?: cookie,
+                visitor = visitor,
+                sync = cfg?.optString("d").orEmpty().substringBefore("||"),
+                clientVersion = cfg?.optString("c").orEmpty(),
+            )
+            cm.flush()
+            dev.sparkynox.sparkytube.logs.LogRecorder.i("Login", "signed in, session saved (visitor data: ${visitor.isNotEmpty()})")
+            nav.pages.clear()
+            nav.tab = dev.sparkynox.sparkytube.ui.NavViewModel.Tab.HOME
+            homeFeedVm.onLoggedIn()
+            showComposeHost()
         }
     }
 
